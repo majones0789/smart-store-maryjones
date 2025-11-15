@@ -71,7 +71,8 @@ def init_logger(
     Returns:
         pathlib.Path: The resolved path to the log file.
     """
-    global _is_configured
+    global _is_configured, _log_file_path
+
     if _is_configured:
         # If already configured once for this process
         return pathlib.Path(log_dir) / log_file_name
@@ -118,6 +119,19 @@ def log_example() -> None:
     logger.error("This is an example error message.")
 
 
+def get_logger(name: str | None = None):
+    """Return a configured logger, initializing logging on first use.
+
+    If a name is provided, attach it as context to the logger.
+    """
+    # Ensure the logger is configured once
+    init_logger()
+
+    if name:
+        return logger.bind(name=name)
+    return logger
+
+
 def main() -> None:
     """Execute logger setup and demonstrate its usage."""
     log_file = init_logger()
@@ -128,4 +142,4 @@ def main() -> None:
 if __name__ == "__main__":
     main()
 
-__all__ = ["get_log_file_path", "init_logger", "log_example", "logger"]
+__all__ = ["get_log_file_path", "init_logger", "log_example", "logger", "get_logger"]
