@@ -167,4 +167,44 @@ Before starting a new session, remember to do a `git pull` and keep your tools u
 
 Each time forward progress is made, remember to git add-commit-push.
 
+## P6 – BI Insights & Storytelling (Mary Jones)
 
+### 1) Business Goal
+Identify the most profitable (net sales) product category in the last 12 months, overall and by region, with a monthly trend drilldown.
+
+**Why it matters:** guides marketing/stocking focus toward categories with highest contribution recently, by region.
+
+### 2) Data Source
+- Used Data Warehouse if available (`data/smart_store_dw.db`), otherwise joined prepared CSVs:
+  - `customers_data_prepared.csv` (Region)
+  - `products_data_prepared.csv` (Category)
+  - `sales_data_prepared.csv` (SaleDate, SaleAmount, DiscountPercent, TransactionID)
+
+### 3) Tools
+Python (pandas, matplotlib) for OLAP-like aggregations, trend analysis, and automation-ready scripts.
+
+### 4) Workflow & Logic
+- **Slicing:** last 12 months based on `SaleDate`
+- **Metrics:** `Net_Sales = SaleAmount * (1 - DiscountPercent/100)`, `Orders = count(TransactionID)`
+- **Dicing:** `category × region`
+- **Drilldown:** monthly trend for top categories
+- **Outputs:** CSVs + PNG charts in `src/data/olap_outputs/`
+
+### 5) Results
+- **Most profitable category:** _<auto-filled in terminal>_
+- **Regional breakdown:** see `p6_category_region_bar.png`
+- **Monthly trend:** see `p6_top_categories_monthly_trend.png`
+
+**Suggested action:** Increase promotional spend and inventory allocation for the top category in regions where month-over-month trend is rising; review pricing/discount policy where trends are flat or declining.
+
+### 6) Suggested Business Action
+- Prioritize top category in procurement & merchandising calendar.
+- Test lower discounts (maintain margin) in regions with strong demand.
+
+### 7) Challenges
+- Warehouse not always available; script auto-falls back to prepared CSVs.
+- Time filtering and column standardization across sources.
+
+### How to run
+```bash
+python src/analytics_project/olap/goal_profitable_category.py
