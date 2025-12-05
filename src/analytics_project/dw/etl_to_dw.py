@@ -1,243 +1,201 @@
-"""ETL to load data into the data warehouse."""
+# src/analytics_project/dw/etl_to_dw.py
 
+from __future__ import annotations
+
+from pathlib import Path
+
+import pandas as pd
 from loguru import logger
-import sqlite3
-import pathlib
-import csv
+
+from analytics_project.dw import DW_PATH, create_connection
 
 
-# ---------- Paths & Connections ----------
+# ---------- Config ----------
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+PREPARED_DIR = REPO_ROOT / "data" / "prepared"
+
+CUSTOMERS_CSV = PREPARED_DIR / "customers_data_prepared.csv"
+PRODUCTS_CSV = PREPARED_DIR / "products_data_prepared.csv"
+SALES_CSV = PREPARED_DIR / "sales_data_prepared.csv"
 
 
-def get_project_root() -> pathlib.Path:
-    """Return the project root folder (repo root)."""
-    # etl_to_dw.py -> dw -> analytics_project -> src -> REPO
-    return pathlib.Path(__file__).resolve().parents[3]
+# ---------- Helpers ----------
 
 
-def get_db_path() -> pathlib.Path:
-    """Return the path to the data warehouse SQLite file."""
-    project_root = get_project_root()
-    db_path = project_root / "data" / "smart_store_dw.db"
-    return db_path
-
-
-def create_connection(db_path: pathlib.Path) -> sqlite3.Connection:
-    """Create a SQLite connection to the DW database."""
-    logger.info(f"Connecting to DW at {db_path}")
-    conn = sqlite3.connect(db_path)
-    return conn
-
-
-# ---------- Schema Creation ----------
-
-
-def create_tables(conn: sqlite3.Connection) -> None:
-    """Drop and recreate DW tables for customers, products, and sales."""
-    cursor = conn.cursor()
-
-    # Drop fact table first (because of foreign keys), then dimensions
-    cursor.execute("DROP TABLE IF EXISTS fact_sales;")
-    cursor.execute("DROP TABLE IF EXISTS dim_products;")
-    cursor.execute("DROP TABLE IF EXISTS dim_customers;")
-
-    sql_dim_customers = """
-    CREATE TABLE dim_customers (
-        customer_id INTEGER PRIMARY KEY,
-        customer_name TEXT,
-        region TEXT,
-        join_date TEXT,
-        loyalty_points INTEGER,
-        preferred_contact TEXT
-    );
-    """
-
-    sql_dim_products = """
-    CREATE TABLE dim_products (
-        product_id INTEGER PRIMARY KEY,
-        product_name TEXT,
-        category TEXT,
-        unit_price REAL,
-        discount_percent REAL,
-        supplier TEXT
-    );
-    """
-
-    sql_fact_sales = """
-    CREATE TABLE fact_sales (
-        transaction_id INTEGER PRIMARY KEY,
-        sale_date TEXT,
-        customer_id INTEGER,
-        product_id INTEGER,
-        store_id INTEGER,
-        campaign_id INTEGER,
-        sale_amount REAL,
-        discount_percent REAL,
-        payment_type TEXT,
-        FOREIGN KEY (customer_id) REFERENCES dim_customers(customer_id),
-        FOREIGN KEY (product_id) REFERENCES dim_products(product_id)
-    );
-    """
-
-    cursor.execute(sql_dim_customers)
-    cursor.execute(sql_dim_products)
-    cursor.execute(sql_fact_sales)
-
-    conn.commit()
+def _drop_and_create_tables(cur) -> None:
+    """Drop and recreate DW tables with a stable schema."""
     logger.info("DW tables dropped (if existed) and recreated.")
 
+    cur.executescript(
+        """
+        DROP TABLE IF EXISTS dim_customers;
+        DROP TABLE IF EXISTS dim_products;
+        DROP TABLE IF EXISTS fact_sales;
 
-# ---------- Load Dimension Tables ----------
+        CREATE TABLE dim_customers (
+            customer_id       INTEGER,
+            customer_name     TEXT,
+            region            TEXT,
+            join_date         TEXT,   -- ISO date 'YYYY-MM-DD'
+            loyalty_points    INTEGER,
+            preferred_contact TEXT
+        );
 
+        CREATE TABLE dim_products (
+            product_id        INTEGER,
+            product_name      TEXT,
+            category          TEXT,
+            unit_price        REAL,
+            discount_percent  REAL,
+            supplier          TEXT
+        );
 
-def load_dim_customers(conn: sqlite3.Connection, csv_path: pathlib.Path) -> None:
-    """Load prepared customer data into dim_customers."""
-    logger.info(f"Loading customers from {csv_path}")
-
-    cursor = conn.cursor()
-    with open(csv_path, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        logger.info(f"Customer CSV headers: {reader.fieldnames}")
-
-        for row in reader:
-            cursor.execute(
-                """
-                INSERT OR REPLACE INTO dim_customers (
-                    customer_id,
-                    customer_name,
-                    region,
-                    join_date,
-                    loyalty_points,
-                    preferred_contact
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    row["CustomerID"],
-                    row["Name"],
-                    row["Region"],
-                    row["JoinDate"],
-                    row["LoyaltyPoints"],
-                    row["PreferredContact"],
-                ),
-            )
-
-    conn.commit()
-    logger.info("Loaded dim_customers.")
-
-
-def load_dim_products(conn: sqlite3.Connection, csv_path: pathlib.Path) -> None:
-    """Load prepared product data into dim_products."""
-    logger.info(f"Loading products from {csv_path}")
-
-    cursor = conn.cursor()
-    with open(csv_path, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        logger.info(f"Product CSV headers: {reader.fieldnames}")
-
-        for row in reader:
-            cursor.execute(
-                """
-                INSERT OR REPLACE INTO dim_products (
-                    product_id,
-                    product_name,
-                    category,
-                    unit_price,
-                    discount_percent,
-                    supplier
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    row["ProductID"],
-                    row["ProductName"],
-                    row["Category"],
-                    row["UnitPrice"],
-                    row["DiscountPercent"],
-                    row["Supplier"],
-                ),
-            )
-
-    conn.commit()
-    logger.info("Loaded dim_products.")
+        CREATE TABLE fact_sales (
+            transaction_id    INTEGER,
+            sale_date         TEXT,   -- ISO date
+            customer_id       INTEGER,
+            product_id        INTEGER,
+            store_id          INTEGER,
+            campaign_id       TEXT,
+            sale_amount       REAL,
+            discount_percent  REAL,
+            payment_type      TEXT
+        );
+        """
+    )
 
 
-# ---------- Load Fact Table ----------
+def _read_csv_expect(path: Path, expected_cols: tuple[str, ...]) -> pd.DataFrame:
+    """Read a CSV and assert it has (at least) the expected columns."""
+    df = pd.read_csv(path)
+    missing = [c for c in expected_cols if c not in df.columns]
+    if missing:
+        raise ValueError(f"{path.name} missing columns: {missing}; found: {list(df.columns)}")
+    return df
 
 
-def load_fact_sales(conn: sqlite3.Connection, csv_path: pathlib.Path) -> None:
-    """Load prepared sales data into fact_sales."""
-    logger.info(f"Loading sales from {csv_path}")
-
-    cursor = conn.cursor()
-    with open(csv_path, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        logger.info(f"Sales CSV headers: {reader.fieldnames}")
-
-        for row in reader:
-            cursor.execute(
-                """
-                INSERT OR REPLACE INTO fact_sales (
-                    transaction_id,
-                    sale_date,
-                    customer_id,
-                    product_id,
-                    store_id,
-                    campaign_id,
-                    sale_amount,
-                    discount_percent,
-                    payment_type
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    row["TransactionID"],
-                    row["SaleDate"],
-                    row["CustomerID"],
-                    row["ProductID"],
-                    row["StoreID"],
-                    row["CampaignID"],
-                    row["SaleAmount"],
-                    row["DiscountPercent"],
-                    row["PaymentType"],
-                ),
-            )
-
-    conn.commit()
-    logger.info("Loaded fact_sales.")
+def _to_iso_date(series: pd.Series) -> pd.Series:
+    return pd.to_datetime(series, errors="coerce").dt.strftime("%Y-%m-%d")
 
 
-# ---------- Main ETL ----------
+# ---------- Loaders ----------
+
+
+def _load_dim_customers(con) -> int:
+    logger.info(f"Loading customers from {CUSTOMERS_CSV}")
+    expected = ("CustomerID", "Name", "Region", "JoinDate", "LoyaltyPoints", "PreferredContact")
+    df = _read_csv_expect(CUSTOMERS_CSV, expected)
+
+    # Rename to DW schema; cast types
+    df = df.rename(
+        columns={
+            "CustomerID": "customer_id",
+            "Name": "customer_name",
+            "Region": "region",
+            "JoinDate": "join_date",
+            "LoyaltyPoints": "loyalty_points",
+            "PreferredContact": "preferred_contact",
+        }
+    ).copy()
+
+    df["customer_id"] = pd.to_numeric(df["customer_id"], errors="coerce").astype("Int64")
+    df["loyalty_points"] = pd.to_numeric(df["loyalty_points"], errors="coerce").astype("Int64")
+    df["join_date"] = _to_iso_date(df["join_date"])
+
+    df.to_sql("dim_customers", con, if_exists="append", index=False)
+    logger.info(f"Loaded dim_customers: {len(df)} rows.")
+    return len(df)
+
+
+def _load_dim_products(con) -> int:
+    logger.info(f"Loading products from {PRODUCTS_CSV}")
+    expected = ("ProductID", "ProductName", "Category", "UnitPrice", "DiscountPercent", "Supplier")
+    df = _read_csv_expect(PRODUCTS_CSV, expected)
+
+    df = df.rename(
+        columns={
+            "ProductID": "product_id",
+            "ProductName": "product_name",
+            "Category": "category",
+            "UnitPrice": "unit_price",
+            "DiscountPercent": "discount_percent",
+            "Supplier": "supplier",
+        }
+    ).copy()
+
+    df["product_id"] = pd.to_numeric(df["product_id"], errors="coerce").astype("Int64")
+    df["unit_price"] = pd.to_numeric(df["unit_price"], errors="coerce")
+    df["discount_percent"] = pd.to_numeric(df["discount_percent"], errors="coerce")
+
+    df.to_sql("dim_products", con, if_exists="append", index=False)
+    logger.info(f"Loaded dim_products: {len(df)} rows.")
+    return len(df)
+
+
+def _load_fact_sales(con) -> int:
+    logger.info(f"Loading sales from {SALES_CSV}")
+    expected = (
+        "TransactionID",
+        "SaleDate",
+        "CustomerID",
+        "ProductID",
+        "StoreID",
+        "CampaignID",
+        "SaleAmount",
+        "DiscountPercent",
+        "PaymentType",
+    )
+    df = _read_csv_expect(SALES_CSV, expected)
+
+    df = df.rename(
+        columns={
+            "TransactionID": "transaction_id",
+            "SaleDate": "sale_date",
+            "CustomerID": "customer_id",
+            "ProductID": "product_id",
+            "StoreID": "store_id",
+            "CampaignID": "campaign_id",
+            "SaleAmount": "sale_amount",
+            "DiscountPercent": "discount_percent",
+            "PaymentType": "payment_type",
+        }
+    ).copy()
+
+    # Casts
+    int_cols = ["transaction_id", "customer_id", "product_id", "store_id"]
+    for c in int_cols:
+        df[c] = pd.to_numeric(df[c], errors="coerce").astype("Int64")
+
+    df["sale_amount"] = pd.to_numeric(df["sale_amount"], errors="coerce")
+    df["discount_percent"] = pd.to_numeric(df["discount_percent"], errors="coerce")
+    df["sale_date"] = _to_iso_date(df["sale_date"])
+
+    df.to_sql("fact_sales", con, if_exists="append", index=False)
+    logger.info(f"Loaded fact_sales: {len(df)} rows.")
+    return len(df)
+
+
+# ---------- Main ----------
 
 
 def main() -> None:
-    """Main ETL entry point to create and populate the DW."""
     logger.info("Starting DW ETL.")
+    logger.info(f"Connecting to DW at {DW_PATH}")
 
-    db_path = get_db_path()
-    conn = create_connection(db_path)
+    with create_connection(DW_PATH) as con:
+        cur = con.cursor()
+        _drop_and_create_tables(cur)
 
-    try:
-        # Recreate tables every time
-        create_tables(conn)
+        n_customers = _load_dim_customers(con)
+        n_products = _load_dim_products(con)
+        n_sales = _load_fact_sales(con)
 
-        # Paths to prepared data
-        project_root = get_project_root()
-        prepared_dir = project_root / "data" / "prepared"
+        con.commit()
 
-        customers_csv = prepared_dir / "customers_data_prepared.csv"
-        products_csv = prepared_dir / "products_data_prepared.csv"
-        sales_csv = prepared_dir / "sales_data_prepared.csv"
-
-        logger.info(f"Using prepared data from {prepared_dir}")
-
-        # Load tables
-        load_dim_customers(conn, customers_csv)
-        load_dim_products(conn, products_csv)
-        load_fact_sales(conn, sales_csv)
-    finally:
-        conn.close()
-        logger.info("DW ETL complete.")
+    logger.info("DW ETL complete.")
+    logger.info(f"Row counts -> customers: {n_customers}, products: {n_products}, sales: {n_sales}")
 
 
 if __name__ == "__main__":
     main()
-    print("ETL finished running.")
-    logger.info("ETL finished running.")
